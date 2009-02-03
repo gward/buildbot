@@ -127,7 +127,7 @@ class AbstractSlaveBuilder(pb.Referenceable):
         self.ping_watchers.append(d)
         if newping:
             if status:
-                event = status.addEvent(["pinging"], "yellow")
+                event = status.addEvent(["pinging"])
                 d2 = defer.Deferred()
                 d2.addCallback(self._pong_status, event)
                 self.ping_watchers.insert(0, d2)
@@ -145,10 +145,8 @@ class AbstractSlaveBuilder(pb.Referenceable):
     def _pong_status(self, res, event):
         if res:
             event.text = ["ping", "success"]
-            event.color = "green"
         else:
             event.text = ["ping", "failed"]
-            event.color = "red"
         event.finish()
 
     def detached(self):

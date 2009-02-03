@@ -217,7 +217,7 @@ class OneBoxPerBuilder(HtmlResource):
                     label = "#%d" % b.getNumber()
                 text = ['<a href="%s">%s</a>' % (url, label)]
                 text.extend(b.getText())
-                box = Box(text, b.getColor(),
+                box = Box(text,
                           class_="LastBuild box %s" % build_get_class(b))
                 data += box.td(align="center")
             else:
