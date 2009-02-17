@@ -2698,7 +2698,7 @@ f.addStep(trigger.Trigger('package', schedulers=['package-all-platforms'],
 By default, buildbot merges BuildRequests that have the compatible
 SourceStamps. This behaviour can be customized with the
 @code{c['mergeRequests']} configuration key.  This key specifies a function
-which is caleld with three arguments: a @code{Builder} and two
+which is called with three arguments: a @code{Builder} and two
 @code{BuildRequest} objects.  It should return true if the requests can be
 merged.  For example:
 
@@ -7004,7 +7004,7 @@ source comes from, as well as accomodating binary extension modules:
 @node Status Delivery, Command-line tool, Build Process, Top
 @chapter Status Delivery
 
-More details are available in the docstrings for each class, use a
+More details are available in the docstrings for each class; use a
 command like @code{pydoc buildbot.status.html.WebStatus} to see them.
 Most status delivery objects take a @code{categories=} argument, which
 can contain a list of ``category'' names: in this case, it will only
