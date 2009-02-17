@@ -22,7 +22,7 @@ from twisted.internet import reactor, defer
 from buildbot.sourcestamp import SourceStamp
 from buildbot.process import buildstep, base, factory
 from buildbot.buildslave import BuildSlave
-from buildbot.steps import shell, source, python
+from buildbot.steps import shell, source, python, master
 from buildbot.status import builder
 from buildbot.status.builder import SUCCESS, WARNINGS, FAILURE
 from buildbot.test.runutils import RunMixin, rmtree
@@ -75,7 +75,7 @@ class BuildStep(unittest.TestCase):
         self.builder_status.nextBuildNumber = 0
         os.mkdir(self.builder_status.basedir)
         self.build_status = self.builder_status.newBuild()
-        req = base.BuildRequest("reason", SourceStamp())
+        req = base.BuildRequest("reason", SourceStamp(), 'test_builder')
         self.build = base.Build([req])
         self.build.build_status = self.build_status # fake it
         self.build.builder = self.builder
@@ -196,7 +196,7 @@ class Steps(unittest.TestCase):
             (shell.Test, {'command': "make testharder"}),
             ]
         f = factory.ConfigurableBuildFactory(steps)
-        req = base.BuildRequest("reason", SourceStamp())
+        req = base.BuildRequest("reason", SourceStamp(), 'test_builder')
         b = f.newBuild([req])
         #for s in b.steps: print s.name
 
@@ -364,7 +364,7 @@ class SlaveVersion(RunMixin, unittest.TestCase):
         return d
 
     def doBuild(self, buildername):
-        br = base.BuildRequest("forced", SourceStamp())
+        br = base.BuildRequest("forced", SourceStamp(), 'test_builder')
         d = br.waitUntilFinished()
         self.control.getBuilder(buildername).requestBuild(br)
         return d
@@ -744,3 +744,44 @@ Result: FAIL
         self.failUnlessEqual(ss.getStatistic('tests-failed'), 287)
         self.failUnlessEqual(ss.getStatistic('tests-total'), 264809)
         self.failUnlessEqual(ss.getStatistic('tests-passed'), 264522)
+
+class MasterShellCommand(StepTester, unittest.TestCase):
+    def testMasterShellCommand(self):
+        self.slavebase = "testMasterShellCommand.slave"
+        self.masterbase = "testMasterShellCommand.master"
+        sb = self.makeSlaveBuilder()
+        step = self.makeStep(master.MasterShellCommand, command=['echo', 'hi'])
+
+        # we can't invoke runStep until the reactor is started .. hence this
+        # little dance
+        d = defer.Deferred()
+        def _dotest(_):
+            return self.runStep(step)
+        d.addCallback(_dotest)
+
+        def _check(results):
+            self.failUnlessEqual(results, SUCCESS)
+            logtxt = step.getLog("stdio").getText()
+            self.failUnlessEqual(logtxt.strip(), "hi")
+        d.addCallback(_check)
+        reactor.callLater(0, d.callback, None)
+        return d
+
+    def testMasterShellCommand_badexit(self):
+        self.slavebase = "testMasterShellCommand_badexit.slave"
+        self.masterbase = "testMasterShellCommand_badexit.master"
+        sb = self.makeSlaveBuilder()
+        step = self.makeStep(master.MasterShellCommand, command="exit 1")
+
+        # we can't invoke runStep until the reactor is started .. hence this
+        # little dance
+        d = defer.Deferred()
+        def _dotest(_):
+            return self.runStep(step)
+        d.addCallback(_dotest)
+
+        def _check(results):
+            self.failUnlessEqual(results, FAILURE)
+        d.addCallback(_check)
+        reactor.callLater(0, d.callback, None)
+        return d

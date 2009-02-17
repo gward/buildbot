@@ -200,6 +200,7 @@ Build Steps
 * Simple ShellCommand Subclasses::
 * Python BuildSteps::
 * Transferring Files::
+* Steps That Run on the Master::
 * Triggering Schedulers::
 * Writing New BuildSteps::
 
@@ -1551,11 +1552,20 @@ address, an IRC handle, etc.
 
 It also has a list of @code{files}, which are just the tree-relative
 filenames of any files that were added, deleted, or modified for this
-Change. These filenames are used by the @code{isFileImportant}
+Change. These filenames are used by the @code{fileIsImportant}
 function (in the Scheduler) to decide whether it is worth triggering a
-new build or not, e.g. the function could use
-@code{filename.endswith(".c")} to only run a build if a C file were
-checked in. Certain BuildSteps can also use the list of changed files
+new build or not, e.g. the function could use the following function
+to only run a build if a C file were checked in:
+
+@example
+def has_C_files(change):
+    for name in change.files:
+        if name.endswith(".c"):
+            return True
+    return False
+@end example
+
+Certain BuildSteps can also use the list of changed files
 to run a more targeted series of tests, e.g. the
 @code{python_twisted.Trial} step can run just the unit tests that
 provide coverage for the modified .py files instead of running the
@@ -1580,7 +1590,7 @@ consumed by the @code{computeSourceRevision} method in the appropriate
 @item CVS
 @code{revision} is an int, seconds since the epoch
 @item SVN
-@code{revision} is an int, a transation number (r%d)
+@code{revision} is an int, the changeset number (r%d)
 @item Darcs
 @code{revision} is a large string, the output of @code{darcs changes --context}
 @item Mercurial
@@ -1661,7 +1671,7 @@ would have a longer tree-stable-timer, maybe 30 minutes, and would
 feed multiple Builders (with a @code{mode=} of @code{'copy'},
 @code{'clobber'}, or @code{'export'}).
 
-The @code{tree-stable-timer} and @code{isFileImportant} decisions are
+The @code{tree-stable-timer} and @code{fileIsImportant} decisions are
 made by the Scheduler. Dependencies are also implemented here.
 Periodic builds (those which are run every N seconds rather than after
 new Changes arrive) are triggered by a special @code{Periodic}
@@ -1670,6 +1680,10 @@ watch for specific branches, ignoring Changes on other branches. This
 may be useful if you have a trunk and a few release branches which
 should be tracked, but when you don't want to have the Buildbot pay
 attention to several dozen private user branches.
+
+When the setup has multiple sources of Changes the @code{category}
+can be used for @code{Scheduler} objects to filter out a subset
+of the Changes.  Note that not all change sources can attach a category.
 
 Some Schedulers may trigger builds for other reasons, other than
 recent Changes. For example, a Scheduler subclass could connect to a
@@ -2353,6 +2367,11 @@ A callable which takes one argument, a Change instance, and returns
 it is not.  Unimportant Changes are accumulated until the build is
 triggered by an important change.  The default value of None means
 that all Changes are important.
+
+@item categories
+A list of categories of changes that this scheduler will respond to.  If this
+is specified, then any non-matching changes are ignored.
+
 @end table
 
 Example:
@@ -2649,6 +2668,7 @@ Here is a fully-worked example:
 
 @example
 from buildbot import scheduler
+from buildbot.process import factory
 from buildbot.steps import trigger
 
 checkin = scheduler.Scheduler(name="checkin",
@@ -2673,21 +2693,21 @@ c['schedulers'] = [checkin, nightly, build, test, package]
 
 # on checkin, make a tarball, build it, and test it
 checkin_factory = factory.BuildFactory()
-f.addStep(trigger.Trigger('mktarball', schedulers=['mktarball'],
-                                       waitForFinish=True)
-f.addStep(trigger.Trigger('build', schedulers=['build-all-platforms'],
-                                   waitForFinish=True)
-f.addStep(trigger.Trigger('test', schedulers=['distributed-test'],
-                                  waitForFinish=True)
+checkin_factory.addStep(trigger.Trigger(schedulerNames=['mktarball'],
+                                       waitForFinish=True))
+checkin_factory.addStep(trigger.Trigger(schedulerNames=['build-all-platforms'],
+                                   waitForFinish=True))
+checkin_factory.addStep(trigger.Trigger(schedulerNames=['distributed-test'],
+                                  waitForFinish=True))
 
 # and every night, make a tarball, build it, and package it
 nightly_factory = factory.BuildFactory()
-f.addStep(trigger.Trigger('mktarball', schedulers=['mktarball'],
-                                       waitForFinish=True)
-f.addStep(trigger.Trigger('build', schedulers=['build-all-platforms'],
-                                   waitForFinish=True)
-f.addStep(trigger.Trigger('package', schedulers=['package-all-platforms'],
-                                     waitForFinish=True)
+nightly_factory.addStep(trigger.Trigger(schedulerNames=['mktarball'],
+                                       waitForFinish=True))
+nightly_factory.addStep(trigger.Trigger(schedulerNames=['build-all-platforms'],
+                                   waitForFinish=True))
+nightly_factory.addStep(trigger.Trigger(schedulerNames=['package-all-platforms'],
+                                     waitForFinish=True))
 @end example
 
 @node Merging BuildRequests, Setting the slaveport, Change Sources and Schedulers, Configuration
@@ -4569,6 +4589,7 @@ control each.
 * Simple ShellCommand Subclasses::
 * Python BuildSteps::
 * Transferring Files::
+* Steps That Run on the Master::
 * Triggering Schedulers::
 * Writing New BuildSteps::
 @end menu
@@ -4596,8 +4617,11 @@ used to give a name to any LogFiles created by this step.
 
 @item haltOnFailure
 if True, a FAILURE of this build step will cause the build to halt
-immediately with an overall result of FAILURE. Steps with
-@code{alwaysRun=True} are still run.
+immediately. Steps with @code{alwaysRun=True} are still run. Generally
+speaking, haltOnFailure implies flunkOnFailure (the default for most
+BuildSteps). In some cases, particularly series of tests, it makes sense
+to haltOnFailure if something fails early on but not flunkOnFailure.
+This can be achieved with haltOnFailure=True, flunkOnFailure=False.
 
 @item flunkOnWarnings
 when True, a WARNINGS or FAILURE of this build step will mark the
@@ -4749,18 +4773,17 @@ system being used.
 
 @item revision
 
-This also comes from the SourceStamp, and is the revision of the
-source code tree that was requested from the VC system. When a build
-is requested of a specific revision (as is generally the case when
-the build is triggered by Changes), this will contain the revision
-specification. The syntax depends upon the VC system in use: for SVN
-it is an integer, for Mercurial it is a short string, for Darcs it
-is a rather large string, etc.
+This also comes from the SourceStamp, and is the revision of the source code
+tree that was requested from the VC system. When a build is requested of a
+specific revision (as is generally the case when the build is triggered by
+Changes), this will contain the revision specification. This is always a
+string, although the syntax depends upon the VC system in use: for SVN it is an
+integer, for Mercurial it is a short string, for Darcs it is a rather large
+string, etc.
 
-If the ``force build'' button was pressed, the revision will be
-@code{None}, which means to use the most recent revision available.
-This is a ``trunk build''. This will be interpolated as an empty
-string.
+If the ``force build'' button was pressed, the revision will be @code{None},
+which means to use the most recent revision available.  This is a ``trunk
+build''. This will be interpolated as an empty string.
 
 @item got_revision
 
@@ -5451,6 +5474,11 @@ f.addStep(ShellCommand(command=["make", "test"],
                        descriptionDone=["tests"]))
 @end example
 
+@item logEnviron
+If this option is true (the default), then the step's logfile will describe the
+environment variables on the slave.  In situations where the environment is not
+relevant and is long, it may be easier to set @code{logEnviron=False}.
+
 @end table
 
 @node Simple ShellCommand Subclasses, Python BuildSteps, ShellCommand, Build Steps
@@ -5661,12 +5689,13 @@ f.addStep(PyFlakes(command=["pyflakes", "src"]))
 @end example
 
 
-@node Transferring Files, Triggering Schedulers, Python BuildSteps, Build Steps
+@node Transferring Files
 @subsection Transferring Files
 
 @cindex File Transfer
 @bsindex buildbot.steps.transfer.FileUpload
 @bsindex buildbot.steps.transfer.FileDownload
+@bsindex buildbot.steps.transfer.DirectoryUpload
 
 Most of the work involved in a build will take place on the
 buildslave. But occasionally it is useful to do some work on the
@@ -5746,8 +5775,56 @@ umask tends to be fairly restrictive, but at least on the buildslave
 you can make it less restrictive with a --umask command-line option at
 creation time (@pxref{Buildslave Options}).
 
+@subheading Transfering Directories
 
-@node Triggering Schedulers, Writing New BuildSteps, Transferring Files, Build Steps
+To transfer complete directories from the buildslave to the master, there
+is a BuildStep named @code{DirectoryUpload}. It works like @code{FileUpload},
+just for directories. However it does not support the @code{maxsize},
+@code{blocksize} and @code{mode} arguments. As an example, let's assume an
+generated project documentation, which consists of many files (like the output
+of doxygen or epydoc). We want to move the entire documentation to the
+buildmaster, into a @code{~/public_html/docs} directory. On the slave-side
+the directory can be found under @code{docs}:
+
+@example
+from buildbot.steps.shell import ShellCommand
+from buildbot.steps.transfer import DirectoryUpload
+
+f.addStep(ShellCommand(command=["make", "docs"]))
+f.addStep(DirectoryUpload(slavesrc="docs",
+				masterdest="~/public_html/docs"))
+@end example
+
+The DirectoryUpload step will create all necessary directories and
+transfers empty directories, too.
+
+@node Steps That Run on the Master
+@subsection Steps That Run on the Master
+
+Occasionally, it is useful to execute some task on the master, for example to
+create a directory, deploy a build result, or trigger some other centralized
+processing.  This is possible, in a limited fashion, with the
+@code{MasterShellCommand} step.
+
+This step operates similarly to a regular @code{ShellCommand}, but executes on
+the master, instead of the slave.  To be clear, the enclosing @code{Build}
+object must still have a slave object, just as for any other step -- only, in
+this step, the slave does not do anything.
+
+In this example, the step renames a tarball based on the day of the week.
+
+@example
+from buildbot.steps.transfer import FileUpload
+from buildbot.steps.master import MasterShellCommand
+
+f.addStep(FileUpload(slavesrc="widgetsoft.tar.gz",
+                     masterdest="/var/buildoutputs/widgetsoft-new.tar.gz"))
+f.addStep(MasterShellCommand(command="""
+    cd /var/buildoutputs;
+    mv widgetsoft-new.tar.gz widgetsoft-`date +%a`.tar.gz"""))
+@end example
+
+@node Triggering Schedulers
 @subsection Triggering Schedulers
 
 The counterpart to the Triggerable described in section
@@ -5779,7 +5856,7 @@ useful to ensure that all of the builds use exactly the same
 SourceStamp, even if other Changes have occurred while the build was
 running.
 
-@node Writing New BuildSteps,  , Triggering Schedulers, Build Steps
+@node Writing New BuildSteps
 @subsection Writing New BuildSteps
 
 While it is a good idea to keep your build process self-contained in
@@ -7669,7 +7746,12 @@ told to shut up.
 from buildbot.status import words
 irc = words.IRC("irc.example.org", "botnickname",
                 channels=["channel1", "channel2"],
-                password="mysecretpassword")
+                password="mysecretpassword",
+                notify_events=@{
+                  'exception': 1,
+                  'successToFailure': 1,
+                  'failureToSuccess': 1,
+                @})
 c['status'].append(irc)
 @end example
 
@@ -7719,10 +7801,11 @@ A build finished successfully
 A build failed
 @item exception
 A build generated and exception
-@item successToFailed
-The previous build was successful, but this one failed
-@item failedToSuccess
-The previous build failed, but this one was successful
+@item xToY
+The previous build was x, but this one is Y, where x and Y are each
+one of success, warnings, failure, exception (except Y is
+capitalized).  For example: successToFailure will notify if the
+previous build was successful, but this one failed
 @end table
 
 @item help COMMAND
@@ -7733,6 +7816,9 @@ Announce the URL of the Buildbot's home page.
 @item version
 Announce the version of this Buildbot.
 @end table
+
+Additionally, the config file may specify default notification options
+as shown in the example earlier.
 
 If the @code{allowForce=True} option was used, some addtional commands
 will be available:
@@ -8348,6 +8434,11 @@ There are other (optional) arguments which can influence the
 This provides the (string) branch specifier. If omitted, it defaults
 to None, indicating the ``default branch''. All files included in this
 Change must be on the same branch.
+
+@item --category
+This provides the (string) category specifier. If omitted, it defaults
+to None, indicating ``no category''. The category property is used
+by Schedulers to filter what changes they listen to.
 
 @item --revision_number
 This provides a (numeric) revision number for the change, used for VC systems

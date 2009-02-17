@@ -15,7 +15,7 @@ from buildbot.slave.registry import registerSlaveCommand
 # this used to be a CVS $-style "Revision" auto-updated keyword, but since I
 # moved to Darcs as the primary repository, this is updated manually each
 # time this file is changed. The last cvs_ver that was here was 1.51 .
-command_version = "2.5"
+command_version = "2.6"
 
 # version history:
 #  >=1.17: commands are interruptable
@@ -37,6 +37,7 @@ command_version = "2.5"
 #  >= 2.3: added bzr (release 0.7.6)
 #  >= 2.4: Git understands 'revision' and branches
 #  >= 2.5: workaround added for remote 'hg clone --rev REV' when hg<0.9.2
+#  >= 2.6: added uploadDirectory
 
 class CommandInterrupted(Exception):
     pass
@@ -236,7 +237,7 @@ class ShellCommand:
                  workdir, environ=None,
                  sendStdout=True, sendStderr=True, sendRC=True,
                  timeout=None, initialStdin=None, keepStdinOpen=False,
-                 keepStdout=False, keepStderr=False,
+                 keepStdout=False, keepStderr=False, logEnviron=True,
                  logfiles={}):
         """
 
@@ -278,6 +279,7 @@ class ShellCommand:
             self.environ.update(environ)
         self.initialStdin = initialStdin
         self.keepStdinOpen = keepStdinOpen
+        self.logEnviron = logEnviron
         self.timeout = timeout
         self.timer = None
         self.keepStdout = keepStdout
@@ -339,14 +341,18 @@ class ShellCommand:
 
         if type(self.command) in types.StringTypes:
             if runtime.platformType  == 'win32':
-                argv = [os.environ['COMSPEC'], '/c', self.command]
+                argv = os.environ['COMSPEC'].split() # allow %COMSPEC% to have args
+                if '/c' not in argv: argv += ['/c'] 
+                argv += [self.command]
             else:
                 # for posix, use /bin/sh. for other non-posix, well, doesn't
                 # hurt to try
                 argv = ['/bin/sh', '-c', self.command]
         else:
             if runtime.platformType  == 'win32':
-                argv = [os.environ['COMSPEC'], '/c'] + list(self.command)
+                argv = os.environ['COMSPEC'].split() # allow %COMSPEC% to have args
+                if '/c' not in argv: argv += ['/c'] 
+                argv += list(self.command)
             else:
                 argv = self.command
 
@@ -381,13 +387,14 @@ class ShellCommand:
         self.sendStatus({'header': msg+"\n"})
 
         # then the environment, since it sometimes causes problems
-        msg = " environment:\n"
-        env_names = self.environ.keys()
-        env_names.sort()
-        for name in env_names:
-            msg += "  %s=%s\n" % (name, self.environ[name])
-        log.msg(" environment: %s" % (self.environ,))
-        self.sendStatus({'header': msg})
+        if self.logEnviron:
+            msg = " environment:\n"
+            env_names = self.environ.keys()
+            env_names.sort()
+            for name in env_names:
+                msg += "  %s=%s\n" % (name, self.environ[name])
+            log.msg(" environment: %s" % (self.environ,))
+            self.sendStatus({'header': msg})
 
         if self.initialStdin:
             msg = " writing %d bytes to stdin" % len(self.initialStdin)
@@ -858,6 +865,99 @@ class SlaveFileUploadCommand(Command):
         return res
 
 registerSlaveCommand("uploadFile", SlaveFileUploadCommand, command_version)
+
+
+class SlaveDirectoryUploadCommand(Command):
+    """
+    Upload a directory from slave to build master
+    Arguments:
+
+        - ['workdir']:   base directory to use
+        - ['slavesrc']:  name of the slave-side directory to read from
+        - ['writer']:    RemoteReference to a transfer._DirectoryWriter object
+        - ['maxsize']:   max size (in bytes) of file to write
+        - ['blocksize']: max size for each data block
+    """
+    debug = True
+
+    def setup(self, args):
+        self.workdir = args['workdir']
+        self.dirname = args['slavesrc']
+        self.writer = args['writer']
+        self.remaining = args['maxsize']
+        self.blocksize = args['blocksize']
+        self.stderr = None
+        self.rc = 0
+
+    def start(self):
+        if self.debug:
+            log.msg('SlaveDirectoryUploadCommand started')
+
+	# create some lists with all files and directories
+	foundFiles = []
+	foundDirs = []
+
+	self.baseRoot = os.path.join(self.builder.basedir,
+                                     self.workdir,
+                        	     os.path.expanduser(self.dirname))
+	if self.debug:
+	    log.msg("baseRoot: %r" % self.baseRoot)
+
+	for root, dirs, files in os.walk(self.baseRoot):
+	    tempRoot = root
+	    relRoot = ''
+	    while (tempRoot != self.baseRoot):
+	        tempRoot, tempRelRoot = os.path.split(tempRoot)
+	        relRoot = os.path.join(tempRelRoot, relRoot)
+	    for name in files:
+	        foundFiles.append(os.path.join(relRoot, name))
+	    for directory in dirs:
+	        foundDirs.append(os.path.join(relRoot, directory))
+
+	if self.debug:
+	    log.msg("foundDirs: %s" % (str(foundDirs)))
+	    log.msg("foundFiles: %s" % (str(foundFiles)))
+	
+	# create all directories on the master, to catch also empty ones
+	for dirname in foundDirs:
+	    self.writer.callRemote("createdir", dirname)
+
+	for filename in foundFiles:
+	    self._writeFile(filename)
+
+	return None
+
+    def _writeFile(self, filename):
+        """Write a file to the remote writer"""
+
+        log.msg("_writeFile: %r" % (filename))
+	self.writer.callRemote('open', filename)
+	data = open(os.path.join(self.baseRoot, filename), "r").read()
+	self.writer.callRemote('write', data)
+	self.writer.callRemote('close')
+        return None
+
+    def interrupt(self):
+        if self.debug:
+            log.msg('interrupted')
+        if self.interrupted:
+            return
+        if self.stderr is None:
+            self.stderr = 'Upload of %r interrupted' % self.path
+            self.rc = 1
+        self.interrupted = True
+        # the next _writeBlock call will notice the .interrupted flag
+
+    def finished(self, res):
+        if self.debug:
+            log.msg('finished: stderr=%r, rc=%r' % (self.stderr, self.rc))
+        if self.stderr is None:
+            self.sendStatus({'rc': self.rc})
+        else:
+            self.sendStatus({'stderr': self.stderr, 'rc': self.rc})
+        return res
+
+registerSlaveCommand("uploadDirectory", SlaveDirectoryUploadCommand, command_version)
 
 
 class SlaveFileDownloadCommand(Command):
@@ -1853,6 +1953,23 @@ class Git(SourceBase):
             return False
         return os.path.isdir(os.path.join(self._fullSrcdir(), ".git"))
 
+    def readSourcedata(self):
+        return open(self.sourcedatafile, "r").read()
+
+    # If the repourl matches the sourcedata file, then
+    # we can say that the sourcedata matches.  We can
+    # ignore branch changes, since Git can work with
+    # many branches fetched, and we deal with it properly
+    # in doVCUpdate.
+    def sourcedataMatches(self):
+        try:
+            olddata = self.readSourcedata()
+            if not olddata.startswith(self.repourl+' '):
+                return False
+        except IOError:
+            return False
+        return True
+
     def _didFetch(self, res):
         if self.revision:
             head = self.revision
@@ -1865,8 +1982,29 @@ class Git(SourceBase):
         self.command = c
         return c.start()
 
+    # Update first runs "git clean", removing local changes,
+    # if the branch to be checked out has changed.  This, combined
+    # with the later "git reset" equates clobbering the repo,
+    # but it's much more efficient.
     def doVCUpdate(self):
-        command = ['git', 'fetch', self.repourl, self.branch]
+        try:
+            # Check to see if our branch has changed
+            diffbranch = self.sourcedata != self.readSourcedata()
+        except IOError:
+            diffbranch = False
+        if diffbranch:
+            command = ['git', 'clean', '-f', '-d']
+            c = ShellCommand(self.builder, command, self._fullSrcdir(),
+                             sendRC=False, timeout=self.timeout)
+            self.command = c
+            d = c.start()
+            d.addCallback(self._abandonOnFailure)
+            d.addCallback(self._didClean)
+            return d
+        return self._didClean(None)
+
+    def _didClean(self, dummy):
+        command = ['git', 'fetch', '-t', self.repourl, self.branch]
         self.sendStatus({"header": "fetching branch %s from %s\n"
                                         % (self.branch, self.repourl)})
         c = ShellCommand(self.builder, command, self._fullSrcdir(),

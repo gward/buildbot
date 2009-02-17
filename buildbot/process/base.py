@@ -61,9 +61,7 @@ class BuildRequest:
 
     implements(interfaces.IBuildRequestControl)
 
-    def __init__(self, reason, source, builderName=None, properties=None):
-        # TODO: remove the =None on builderName, it is there so I don't have
-        # to change a lot of tests that create BuildRequest objects
+    def __init__(self, reason, source, builderName, properties=None):
         assert interfaces.ISourceStamp(source, None)
         self.reason = reason
         self.source = source
@@ -517,7 +515,6 @@ class Build:
             if step.flunkOnFailure:
                 self.result = FAILURE
             if step.haltOnFailure:
-                self.result = FAILURE
                 terminate = True
         elif result == WARNINGS:
             if step.warnOnWarnings:
